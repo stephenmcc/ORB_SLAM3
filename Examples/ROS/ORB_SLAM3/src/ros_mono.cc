@@ -21,9 +21,18 @@
 #include<algorithm>
 #include<fstream>
 #include<chrono>
+#include <cstdlib>
+
+#include"Converter.h"
+
+//for pubbing
+#include <geometry_msgs/PoseStamped.h>
+#include <geometry_msgs/Point.h>
+#include <geometry_msgs/Quaternion.h>
 
 #include<ros/ros.h>
 #include <cv_bridge/cv_bridge.h>
+#include<tf/transform_broadcaster.h>
 
 #include<opencv2/core/core.hpp>
 
@@ -37,8 +46,10 @@ public:
     ImageGrabber(ORB_SLAM3::System* pSLAM):mpSLAM(pSLAM){}
 
     void GrabImage(const sensor_msgs::ImageConstPtr& msg);
+    void SetPub(ros::Publisher* pub);
 
     ORB_SLAM3::System* mpSLAM;
+    ros::Publisher* orb_pub;
 };
 
 int main(int argc, char **argv)
@@ -63,6 +74,8 @@ int main(int argc, char **argv)
     // string imgTopic = "/camera/image_raw";
     string imgTopic = "/zed/zed_node/left_raw/image_raw_color";
     ros::Subscriber sub = nodeHandler.subscribe(imgTopic, 1, &ImageGrabber::GrabImage,&igb);
+    ros::Publisher pose_pub = nodeHandler.advertise<geometry_msgs::PoseStamped>("orb_pose", 100);
+    igb.SetPub(&pose_pub);
 
     ros::spin();
 
@@ -75,6 +88,12 @@ int main(int argc, char **argv)
     ros::shutdown();
 
     return 0;
+}
+
+//method for assigning publisher
+void ImageGrabber::SetPub(ros::Publisher* pub)
+{
+    orb_pub = pub;
 }
 
 void ImageGrabber::GrabImage(const sensor_msgs::ImageConstPtr& msg)
@@ -91,7 +110,28 @@ void ImageGrabber::GrabImage(const sensor_msgs::ImageConstPtr& msg)
         return;
     }
 
-    mpSLAM->TrackMonocular(cv_ptr->image,cv_ptr->header.stamp.toSec());
+    cv::Mat T_ = mpSLAM->TrackMonocular(cv_ptr->image,cv_ptr->header.stamp.toSec());
+
+    if (!T_.empty())
+    {
+        cv::Size s = T_.size();
+        if ((s.height >= 3) && (s.width >= 3)) {
+            cv::Mat R_, t_ ;
+
+            R_ = T_.rowRange(0,3).colRange(0,3).t();
+            t_ = -R_*T_.rowRange(0,3).col(3);
+            vector<float> q = ORB_SLAM3::Converter::toQuaternion(R_);
+            float scale_factor=1.0;
+            tf::Transform transform;
+            transform.setOrigin(tf::Vector3(t_.at<float>(0, 0)*scale_factor, t_.at<float>(0, 1)*scale_factor, t_.at<float>(0, 2)*scale_factor));
+            tf::Quaternion tf_quaternion(q[0], q[1], q[2], q[3]);
+            transform.setRotation(tf_quaternion);
+            geometry_msgs::PoseStamped pose;
+            pose.header.frame_id ="ORB_SLAM3_MONO_INERTIAL";
+            tf::poseTFToMsg(transform, pose.pose);
+            orb_pub->publish(pose);
+        }
+    }
 }
 
 

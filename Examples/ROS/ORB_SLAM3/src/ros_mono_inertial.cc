@@ -24,11 +24,17 @@
 #include<queue>
 #include<thread>
 #include<mutex>
+#include <cstdlib>
+#include"Converter.h"
 
 #include<ros/ros.h>
 #include<cv_bridge/cv_bridge.h>
 #include<sensor_msgs/Imu.h>
 #include<tf/transform_broadcaster.h>
+
+#include <geometry_msgs/PoseStamped.h>
+#include <geometry_msgs/Point.h>
+#include <geometry_msgs/Quaternion.h>
 
 #include<opencv2/core/core.hpp>
 
@@ -55,12 +61,14 @@ public:
     void GrabImage(const sensor_msgs::ImageConstPtr& msg);
     cv::Mat GetImage(const sensor_msgs::ImageConstPtr &img_msg);
     void SyncWithImu();
+    void SetPub(ros::Publisher* pub);
 
     queue<sensor_msgs::ImageConstPtr> img0Buf;
     std::mutex mBufMutex;
 
     ORB_SLAM3::System* mpSLAM;
     ImuGrabber *mpImuGb;
+    ros::Publisher* orb_pub;
 
     const bool mbClahe;
     cv::Ptr<cv::CLAHE> mClahe = cv::createCLAHE(3.0, cv::Size(8, 8));
@@ -101,6 +109,8 @@ int main(int argc, char **argv)
     // Maximum delay, 5 seconds
     ros::Subscriber sub_imu = n.subscribe("/imu", 1000, &ImuGrabber::GrabImu, &imugb);
     ros::Subscriber sub_img0 = n.subscribe(imgTopic, 100, &ImageGrabber::GrabImage,&igb);
+    ros::Publisher pose_pub = n.advertise<geometry_msgs::PoseStamped>("orb_pose", 100);
+    igb.SetPub(&pose_pub);
 
     std::thread sync_thread(&ImageGrabber::SyncWithImu,&igb);
 
@@ -116,6 +126,12 @@ void ImageGrabber::GrabImage(const sensor_msgs::ImageConstPtr &img_msg)
         img0Buf.pop();
     img0Buf.push(img_msg);
     mBufMutex.unlock();
+}
+
+//method for assigning publisher
+void ImageGrabber::SetPub(ros::Publisher* pub)
+{
+    orb_pub = pub;
 }
 
 cv::Mat ImageGrabber::GetImage(const sensor_msgs::ImageConstPtr &img_msg)
@@ -179,17 +195,49 @@ void ImageGrabber::SyncWithImu()
             if(mbClahe)
                 mClahe->apply(im,im);
 
-            cv::Mat pose = mpSLAM->TrackMonocular(im,tIm,vImuMeas);
+            cv::Mat T_ = mpSLAM->TrackMonocular(im,tIm,vImuMeas);
+
+            ros::Time::now();
+
 //      cv::Mat pose = mpSLAM->TrackMonocular(im,tIm,vImuMeas);
 
             // Publish camera transform
-//      static tf::TransformBroadcaster br;
-//      static tf::Transform transform;
-//      transform.setOrigin(tf::Vector3(pose.at<float>(0,3), pose.at<float>(1,3), pose.at<float>(2,3));
-//      tf::Quaternion q;
-////      q.setRPY(0, 0, msg->theta);
-//      transform.setRotation(q);
-//      br.sendTransform(tf::StampedTransform(transform, ros::Time::now(), "world", "camera"));
+//            static tf::TransformBroadcaster br;
+//            static tf::Transform transform;
+//            transform.setOrigin(tf::Vector3(pose.at<float>(0,3), pose.at<float>(1,3), pose.at<float>(2,3)));
+//            tf::Quaternion q;
+//////      q.setRPY(0, 0, msg->theta);
+//            transform.setRotation(q);
+//            br.sendTransform(tf::StampedTransform(transform, ros::Time::now(), "world", "camera"));
+
+
+            cv::Size s = T_.size();
+            if ((s.height >= 3) && (s.width >= 3)) {
+                cv::Mat R_, t_ ;
+
+                R_ = T_.rowRange(0,3).colRange(0,3).t();
+                t_ = -R_*T_.rowRange(0,3).col(3);
+                vector<float> q = ORB_SLAM3::Converter::toQuaternion(R_);
+                float scale_factor=1.0;
+                tf::Transform transform;
+                transform.setOrigin(tf::Vector3(t_.at<float>(0, 0)*scale_factor, t_.at<float>(0, 1)*scale_factor, t_.at<float>(0, 2)*scale_factor));
+                tf::Quaternion tf_quaternion(q[0], q[1], q[2], q[3]);
+                transform.setRotation(tf_quaternion);
+                /*
+                if (pub_tf)
+                  {
+                    static tf::TransformBroadcaster br_;
+                    br_.sendTransform(tf::StampedTransform(transform, ros::Time(tIm), "world", "ORB_SLAM3_MONO_INERTIAL"));
+                  }
+                */
+
+                geometry_msgs::PoseStamped pose;
+                //pose.header.stamp = img0Buf.front()->header.stamp;
+                pose.header.frame_id ="ORB_SLAM3_MONO_INERTIAL";
+                tf::poseTFToMsg(transform, pose.pose);
+                orb_pub->publish(pose);
+            }
+
         }
 
         std::chrono::milliseconds tSleep(1);
